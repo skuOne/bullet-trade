@@ -77,7 +77,7 @@ Changelog = "https://github.com/BulletTrade/bullet-trade/blob/main/CHANGELOG.md"
 bullet-trade = "bullet_trade.cli.main:main"
 
 [tool.setuptools.packages.find]
-include = ["bullet_trade*"]
+include = ["bullet_trade*", "helpers*"]
 exclude = ["tests*", "docs*", "examples*"]
 
 [tool.setuptools]
