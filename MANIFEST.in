@@ -8,6 +8,7 @@ include pytest.ini
 include env.example
 include env.backtest.example
 include env.live.example
+recursive-include helpers *.py
 
 # 排除文件
 recursive-exclude * __pycache__

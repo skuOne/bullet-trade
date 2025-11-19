@@ -553,20 +553,43 @@ class LiveEngine:
             log.warning(f"获取 current_data 失败，订单无法执行: {exc}")
             clear_order_queue()
             return
+        open_position_symbols = self._get_open_position_symbols()
+        pending_new_positions: Set[str] = set()
         for order in orders:
             plan = self._build_order_plan(order, current_data)
             if not plan:
                 continue
             try:
+                price_basis = plan.price if plan.price and plan.price > 0 else plan.last_price
+                order_value = float(plan.amount * max(price_basis, 0.0))
+                if order_value <= 0:
+                    log.warning(f"订单 {plan.security} 价值异常，忽略执行")
+                    continue
+                action = 'buy' if plan.is_buy else 'sell'
+                risk = self._risk
+                if risk:
+                    positions_count = len(open_position_symbols | pending_new_positions)
+                    total_value = float(getattr(self.context.portfolio, "total_value", 0.0) or 0.0)
+                    try:
+                        risk.check_order(
+                            order_value=order_value,
+                            current_positions_count=positions_count,
+                            security=plan.security,
+                            total_value=total_value,
+                            action=action,
+                        )
+                    except ValueError as risk_exc:
+                        log.error(f"风控拒绝委托[{action}] {plan.security}: {risk_exc}")
+                        continue
                 price_arg = plan.price if plan.price and plan.price > 0 else None
                 style_obj = getattr(order, "style", None)
                 style_name = style_obj.__class__.__name__ if style_obj else "MarketOrderStyle"
                 price_value = plan.price if plan.price is not None else price_arg
                 price_repr = f"{price_value:.4f}" if price_value else "未指定"
                 price_mode = "限价" if price_arg else "市价"
-                action = "买入" if plan.is_buy else "卖出"
+                action_label = "买入" if plan.is_buy else "卖出"
                 log.info(
-                    f"执行委托[{action}] {plan.security}: 行情价={plan.last_price:.4f}, "
+                    f"执行委托[{action_label}] {plan.security}: 行情价={plan.last_price:.4f}, "
                     f"委托价={price_repr}（{price_mode}），风格={style_name}, 数量={plan.amount}"
                 )
                 order_id: Optional[str] = None
@@ -579,9 +602,16 @@ class LiveEngine:
                         plan.security, plan.amount, price_arg, wait_timeout=plan.wait_timeout
                     )
                 log.info(
-                    f"委托[{action}] {plan.security} 已提交，订单ID={order_id or '未知'}，"
+                    f"委托[{action_label}] {plan.security} 已提交，订单ID={order_id or '未知'}，"
                     f"数量={plan.amount}"
                 )
+                if risk:
+                    try:
+                        risk.record_trade(order_value, action=action)
+                    except Exception as record_exc:
+                        log.debug(f"记录风控交易失败: {record_exc}")
+                    if plan.is_buy and plan.security not in open_position_symbols:
+                        pending_new_positions.add(plan.security)
             except Exception as exc:
                 log.error(f"委托失败 {order.security}: {exc}")
         clear_order_queue()
@@ -683,6 +713,18 @@ class LiveEngine:
     def _get_position_amount(self, security: str) -> int:
         pos = self.context.portfolio.positions.get(security)
         return int(pos.total_amount) if pos else 0
+
+    def _get_open_position_symbols(self) -> Set[str]:
+        positions = getattr(self.context.portfolio, "positions", {}) or {}
+        result: Set[str] = set()
+        for sec, pos in positions.items():
+            try:
+                amount = int(getattr(pos, "total_amount", 0) or 0)
+            except Exception:
+                amount = 0
+            if amount > 0:
+                result.add(sec)
+        return result
 
     def _get_closeable_amount(self, security: str) -> int:
         pos = self.context.portfolio.positions.get(security)
