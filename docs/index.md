@@ -68,4 +68,4 @@ BulletTrade 是一套兼容聚宽 API 的量化研究与交易框架，支持多
 
 如需交流或反馈，低佣开通QMT等，可扫码添加微信，并在 Issue/PR 中提出建议：
 
-<img src="assets/wechat-contact.png" alt="微信二维码" style="max-width: 200px;">
+<img src="assets/wechat-contact.png" alt="微信二维码" width="180">

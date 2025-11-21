@@ -9,4 +9,4 @@
 - 交流：可通过站点上的微信二维码联系，或在 PR/Issue 里继续讨论。
 
 <p>微信交流：</p>
-<img src="assets/wechat-contact.png" alt="微信二维码" style="max-width: 200px;">
+<img src="assets/wechat-contact.png" alt="微信二维码" width="180">
