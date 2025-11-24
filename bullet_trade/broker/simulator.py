@@ -182,6 +182,24 @@ class SimulatorBroker(BrokerBase):
         """模拟券商允许订阅 tick（基于自定义价格）"""
         return True
 
+    def subscribe_ticks(self, symbols: List[str]) -> None:
+        """tick 订阅占位实现：预置一个默认价格，避免上层报错。"""
+        for sym in symbols:
+            self._mock_prices.setdefault(sym, 10.0)
+
+    def subscribe_markets(self, markets: List[str]) -> None:
+        """市场级订阅在模拟券商中忽略即可。"""
+        return None
+
+    def unsubscribe_ticks(self, symbols: Optional[List[str]] = None) -> None:
+        """取消订阅（清理 mock 价格），允许 symbols 为空表示全部。"""
+        if symbols is None:
+            self._mock_prices.clear()
+            return None
+        for sym in symbols:
+            self._mock_prices.pop(sym, None)
+        return None
+
     def get_current_tick(self, symbol: str) -> Optional[Dict[str, Any]]:
         """根据 mock price 生成简易 tick"""
         price = self._mock_prices.get(symbol)
