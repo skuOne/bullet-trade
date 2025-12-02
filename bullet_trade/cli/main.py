@@ -77,10 +77,12 @@ def create_parser():
         """
     )
     
+    # 从单一来源读取版本号
+    from bullet_trade.__version__ import __version__
     parser.add_argument(
         '--version',
         action='version',
-        version='%(prog)s 0.5.0'
+        version=f'%(prog)s {__version__}'
     )
 
     # 全局 env 文件参数（对所有子命令生效）

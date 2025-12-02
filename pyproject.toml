@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "bullet-trade"
-version = "0.5.0"
+# 版本号从 bullet_trade/__version__.py 动态读取，升级时只需修改那一个文件
+dynamic = ["version"]
 description = "BulletTrade - 专业的量化交易系统，兼容聚宽策略，支持多数据源和实盘交易"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -91,6 +92,10 @@ exclude = ["tests*", "docs*", "examples*"]
 [tool.setuptools]
 py-modules = ["jqdata"]
 include-package-data = true
+
+[tool.setuptools.dynamic]
+# 从 bullet_trade/__version__.py 的 __version__ 变量读取版本号
+version = {attr = "bullet_trade.__version__.__version__"}
 
 [tool.setuptools.package-data]
 "bullet_trade.reporting" = ["templates/*.html"]
