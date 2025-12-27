@@ -51,16 +51,20 @@ __all__ = [
     'set_benchmark', 'set_option', 'set_slippage', 'set_order_cost', 'set_commission', 'set_universe',
     
     # 数据API
-    'get_price', 'attribute_history',
-    'get_current_data',
-    'get_trade_days', 'get_all_securities',
-    'get_index_stocks',
+    'get_price', 'history', 'attribute_history', 'get_bars', 'get_ticks', 'get_current_tick',
+    'get_current_data', 'get_extras', 'get_fundamentals', 'get_fundamentals_continuously',
+    'get_trade_days', 'get_trade_day', 'get_all_securities', 'get_security_info', 'get_fund_info',
+    'get_index_stocks', 'get_index_weights',
+    'get_industry_stocks', 'get_industry', 'get_concept_stocks', 'get_concept',
+    'get_margincash_stocks', 'get_marginsec_stocks',
+    'get_dominant_future', 'get_future_contracts',
+    'get_billboard_list', 'get_locked_shares',
     'get_split_dividend',
     'set_data_provider', 'get_data_provider',
     # 研究文件读写
     'read_file', 'write_file',
     # Tick 订阅与快照（占位/最小实现）
-    'subscribe', 'unsubscribe', 'unsubscribe_all', 'get_current_tick',
+    'subscribe', 'unsubscribe', 'unsubscribe_all',
 
     # 数据模型
     'Context', 'Portfolio', 'SubPortfolio', 'Position',

@@ -12,6 +12,9 @@ from typing import Dict, Any, List, Tuple
 import pytest
 import yaml
 
+# 加载 .env 环境变量
+from bullet_trade.utils.env_loader import load_env
+
 # 添加项目根目录到路径
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -196,6 +199,26 @@ def test_strategy(strategy_name: str, strategy_path: Path):
     print(f"文件路径: {strategy_path}")
     print(f"{'='*60}")
     
+    # 特定策略前置检查
+    if strategy_name == "data_api_temporal_guards":
+        load_env()
+        if not os.getenv("JQDATA_USERNAME") or not os.getenv("JQDATA_PASSWORD"):
+            pytest.skip("缺少 JQDATA_USERNAME/JQDATA_PASSWORD，跳过 data_api_temporal_guards")
+        try:
+            import jqdatasdk  # noqa: F401
+        except Exception:
+            pytest.skip("未安装 jqdatasdk，跳过 data_api_temporal_guards")
+
+    # 加载策略模块前确保 jqdata 仍指向本地兼容模块（防止被其他测试污染）
+    _local_jq_path = (project_root / "jqdata.py").resolve()
+    jq_module = sys.modules.get("jqdata")
+    if Path(getattr(jq_module, "__file__", "")).resolve() != _local_jq_path:
+        spec = importlib.util.spec_from_file_location("jqdata", _local_jq_path)
+        jq_module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(jq_module)  # type: ignore[arg-type]
+        sys.modules["jqdata"] = jq_module  # type: ignore[arg-type]
+
     # 加载策略模块
     strategy_module = load_strategy_module(strategy_path)
     

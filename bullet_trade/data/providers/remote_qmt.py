@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import pandas as pd
@@ -84,6 +85,25 @@ class RemoteQmtProvider(DataProvider):
         values = resp.get("value") or resp.get("values") or []
         return [pd.to_datetime(v) for v in values]
 
+    def get_trade_day(self, security: Union[str, List[str]], query_dt: Union[str, datetime]) -> Any:
+        try:
+            trade_days = self.get_trade_days(end_date=query_dt, count=1)
+        except Exception:
+            trade_days = []
+        if not trade_days:
+            last_day = None
+        else:
+            last_value = trade_days[-1]
+            try:
+                last_day = pd.to_datetime(last_value).date()
+            except Exception:
+                last_day = last_value
+        if isinstance(security, (list, tuple, set)):
+            securities = list(security)
+        else:
+            securities = [security]
+        return {str(sec): last_day for sec in securities}
+
     def get_all_securities(self, types: Union[str, List[str]] = "stock", date: Optional[str] = None) -> pd.DataFrame:
         payload = {"types": types, "date": date}
         resp = self._connection.request("data.get_all_securities", payload)
@@ -104,8 +124,12 @@ class RemoteQmtProvider(DataProvider):
         resp = self._connection.request("data.get_split_dividend", payload)
         return resp.get("events") or []
 
-    def get_security_info(self, security: str) -> Dict[str, Any]:
-        payload = {"security": security}
+    def get_security_info(
+        self,
+        security: str,
+        date: Optional[Union[str, datetime]] = None,
+    ) -> Dict[str, Any]:
+        payload = {"security": security, "date": date}
         resp = self._connection.request("data.security_info", payload)
         return resp.get("value") or {}
 
@@ -119,7 +143,13 @@ class RemoteQmtProvider(DataProvider):
     def unsubscribe_ticks(self, symbols: Optional[List[str]] = None) -> Dict:
         return self._connection.unsubscribe(self._subscription_key, symbols)
 
-    def get_current_tick(self, security: str) -> Dict[str, Any]:
+    def get_current_tick(
+        self,
+        security: str,
+        dt: Optional[Union[str, datetime]] = None,
+        df: bool = False,
+    ) -> Dict[str, Any]:
+        _ = dt, df
         payload = {"security": security}
         resp = self._connection.request("data.snapshot", payload)
         return resp or {}

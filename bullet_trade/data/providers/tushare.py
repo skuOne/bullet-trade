@@ -375,6 +375,14 @@ class TushareProvider(DataProvider):
             if not rows:
                 return {}
             merged = pd.concat(rows, ignore_index=True).drop_duplicates("ts_code")
+            if kw.get("date") is not None:
+                try:
+                    target_dt = pd.to_datetime(kw["date"])
+                    start_dt = pd.to_datetime(merged["start_date"], errors="coerce").fillna(pd.Timestamp.min)
+                    end_dt = pd.to_datetime(merged["end_date"], errors="coerce").fillna(pd.Timestamp.max)
+                    merged = merged[(start_dt <= target_dt) & (end_dt >= target_dt)]
+                except Exception:
+                    pass
             merged.set_index("ts_code", inplace=True)
             merged.index = [self._to_jq_code(code) for code in merged.index]
             return merged.to_dict(orient="index")
@@ -400,6 +408,82 @@ class TushareProvider(DataProvider):
             return [self._to_jq_code(code) for code in df["con_code"].dropna().tolist()]
 
         return self._cache.cached_call("get_index_stocks", kwargs, _fetch, result_type="list_str")
+
+    def get_index_weights(self, index_id: str, date: Optional[Union[str, datetime]] = None) -> Any:
+        kwargs = {"index_id": index_id, "date": date}
+
+        def _fetch(kw: Dict[str, Any]) -> pd.DataFrame:
+            pro = self._ensure_client()
+            index_code = self._to_ts_code(kw["index_id"])
+            target_date = self._format_date(kw.get("date")) or datetime.today().strftime("%Y%m%d")
+            df = pro.index_weight(index_code=index_code, trade_date=target_date)
+            if df is None or df.empty:
+                return pd.DataFrame(columns=["code", "weight", "date"])
+            df = df.rename(columns={"con_code": "code", "trade_date": "date"})
+            df["code"] = df["code"].apply(self._to_jq_code)
+            df["date"] = pd.to_datetime(df["date"], errors="coerce")
+            return df[["code", "weight", "date"]]
+
+        return self._cache.cached_call("get_index_weights", kwargs, _fetch, result_type="df")
+
+    def get_security_info(
+        self,
+        security: str,
+        date: Optional[Union[str, datetime]] = None,
+    ) -> Dict[str, Any]:
+        def _normalize_date(value: Any) -> Optional[Date]:
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                return None
+            try:
+                return pd.to_datetime(value).date()
+            except Exception:
+                return None
+
+        target = self._to_jq_code(security)
+        for t in ("stock", "fund", "etf", "lof", "index"):
+            df = self.get_all_securities(types=t, date=date)
+            if df is None or df.empty or target not in df.index:
+                continue
+            row = df.loc[target]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[0]
+            return {
+                "display_name": row.get("display_name") or target,
+                "name": row.get("name") or target.split(".", 1)[0],
+                "start_date": _normalize_date(row.get("start_date")),
+                "end_date": _normalize_date(row.get("end_date")) or Date(2200, 1, 1),
+                "type": row.get("type") or "stock",
+                "subtype": None,
+                "parent": None,
+            }
+        return {
+            "display_name": target,
+            "name": target.split(".", 1)[0],
+            "start_date": None,
+            "end_date": Date(2200, 1, 1),
+            "type": "stock",
+            "subtype": None,
+            "parent": None,
+        }
+
+    def get_trade_day(self, security: Union[str, List[str]], query_dt: Union[str, datetime]) -> Any:
+        try:
+            trade_days = self.get_trade_days(end_date=query_dt, count=1)
+        except Exception:
+            trade_days = []
+        if not trade_days:
+            last_day = None
+        else:
+            last_value = trade_days[-1]
+            try:
+                last_day = pd.to_datetime(last_value).date()
+            except Exception:
+                last_day = last_value
+        if isinstance(security, (list, tuple, set)):
+            securities = list(security)
+        else:
+            securities = [security]
+        return {str(sec): last_day for sec in securities}
 
     # ------------------------ Live 快照 ------------------------
     def get_live_current(self, security: str) -> Dict[str, Any]:

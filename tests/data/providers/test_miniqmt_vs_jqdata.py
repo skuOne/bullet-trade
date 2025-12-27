@@ -47,15 +47,6 @@ class FakeXtData:
         return {}
 
 
-class FakeTushareHelper:
-    def __init__(self, events):
-        self._events = events
-
-    def get_split_dividend(self, security, start_date=None, end_date=None):
-        return list(self._events)
-
-    def get_index_stocks(self, index_symbol, date=None):
-        return []
 
 
 def _build_sample_frames():
@@ -131,8 +122,6 @@ def _make_provider(monkeypatch, fake_xt: FakeXtData, **config):
         "_ensure_xtdata",
         staticmethod(lambda: fake_xt),
     )
-    # 避免真实依赖触发
-    monkeypatch.setattr(miniqmt.MiniQMTProvider, "_ensure_tushare_helper", lambda self: None)
     monkeypatch.delenv("DATA_CACHE_DIR", raising=False)
     provider = MiniQMTProvider(config)
     provider.auth()
@@ -204,36 +193,20 @@ def test_live_mode_disables_auto_download(monkeypatch):
 
 
 @pytest.mark.unit
-def test_get_split_dividend_uses_tushare_fallback(monkeypatch):
+def test_get_split_dividend_no_cross_provider_fallback(monkeypatch):
     frames, _, dates, raw_df = _build_sample_frames()
     fake_xt = FakeXtData(frames, dividends={SECURITY_QMT: pd.DataFrame()})
-    tushare_events = [
-        {
-            "security": SECURITY_QMT,
-            "date": dt.date(2025, 6, 12),
-            "scale_factor": 1.1,
-            "bonus_pre_tax": 3.0,  # 每 10 股
-            "per_base": 10,
-        }
-    ]
-    fake_tushare = FakeTushareHelper(tushare_events)
+    _ = raw_df
 
     monkeypatch.setattr(
         miniqmt.MiniQMTProvider,
         "_ensure_xtdata",
         staticmethod(lambda: fake_xt),
     )
-    monkeypatch.setattr(miniqmt.MiniQMTProvider, "_ensure_tushare_helper", lambda self: fake_tushare)
     monkeypatch.delenv("DATA_CACHE_DIR", raising=False)
 
     provider = MiniQMTProvider({"cache_dir": None})
 
     events = provider.get_split_dividend(SECURITY_JQ, start_date=dates[0], end_date=dates[-1])
 
-    assert events
-    event = events[0]
-    assert event["security"] == SECURITY_JQ
-    # 股票分红格式：per_base=10，bonus_pre_tax 为每10股派息（保持与 Tushare/JQData 一致）
-    assert event["bonus_pre_tax"] == pytest.approx(3.0)  # 每10股派息3元
-    assert event["per_base"] == 10.0  # 基数为10股
-    assert event["scale_factor"] == pytest.approx(1.1)
+    assert events == []

@@ -42,6 +42,50 @@
 - 🔒 对数据安全有要求
 - 💻 已有 QMT 环境
 
+## 📋 数据 API 支持矩阵
+
+标记说明：
+- ✅H：已实现，支持历史视角（可在回测按日期/时间查询）
+- ✅：已实现，但仅返回最新或不保证历史视角
+- —：未实现（会抛 `NotImplementedError`）
+
+回测说明：
+- 若数据源不支持历史视角，回测中会抛 `UserError`，避免误用“最新数据”参与回测。
+
+| API | JQData | MiniQMT | RemoteQMT | Tushare |
+| --- | --- | --- | --- | --- |
+| get_price | ✅H | ✅H | ✅H | ✅H |
+| history | ✅H | ✅H | ✅H | ✅H |
+| attribute_history | ✅H | ✅H | ✅H | ✅H |
+| get_bars | ✅H | — | — | — |
+| get_ticks | ✅H | — | — | — |
+| get_current_tick | ✅ | ✅ | ✅ | — |
+| get_current_data | ✅ | ✅ | ✅ | ✅ |
+| get_extras | ✅H | — | — | — |
+| get_fundamentals | ✅H | — | — | — |
+| get_fundamentals_continuously | ✅H | — | — | — |
+| get_all_securities | ✅H | ✅ | ✅ | ✅H |
+| get_security_info | ✅H | ✅ | ✅ | ✅H |
+| get_fund_info | ✅H | — | — | — |
+| get_trade_days | ✅H | ✅H | ✅H | ✅H |
+| get_trade_day | ✅H | ✅H | ✅H | ✅H |
+| get_index_stocks | ✅H | ✅H | ✅H | ✅H |
+| get_index_weights | ✅H | — | — | ✅H |
+| get_industry_stocks | ✅H | — | — | — |
+| get_industry | ✅H | — | — | — |
+| get_concept_stocks | ✅H | — | — | — |
+| get_concept | ✅H | — | — | — |
+| get_margincash_stocks | ✅H | — | — | — |
+| get_marginsec_stocks | ✅H | — | — | — |
+| get_dominant_future | ✅H | — | — | — |
+| get_future_contracts | ✅H | — | — | — |
+| get_billboard_list | ✅H | — | — | — |
+| get_locked_shares | ✅H | — | — | — |
+| get_split_dividend | ✅H | ✅H | ✅H | ✅H |
+
+补充说明：
+- MiniQMT/RemoteQMT 的指数成分历史视角依赖 xtquant/远端服务端实现，若接口返回为空或报错请以实际能力为准。
+
 ## 🔧 配置说明
 
 ### 1. JQData 配置（.env 示例）

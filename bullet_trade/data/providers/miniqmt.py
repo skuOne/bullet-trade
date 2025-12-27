@@ -57,7 +57,6 @@ class MiniQMTProvider(DataProvider):
             cache_dir=cache_dir,
             fallback_to_env=not cache_dir_set,
         )
-        self._tushare_helper = None
         self._tick_callback = None
 
     # ------------------------ 工具函数 ------------------------
@@ -71,16 +70,6 @@ class MiniQMTProvider(DataProvider):
             raise ImportError(
                 "miniQMT 数据源依赖 xtquant，请安装官方 SDK（pip install xtquant）或 bullet-trade[qmt]"
             ) from exc
-
-    def _ensure_tushare_helper(self):
-        token = self.config.get("tushare_token") or os.getenv("TUSHARE_TOKEN")
-        if not token:
-            return None
-        if self._tushare_helper is None:
-            from .tushare import TushareProvider
-
-            self._tushare_helper = TushareProvider({"token": token, "cache_dir": self.config.get("cache_dir")})
-        return self._tushare_helper
 
     @classmethod
     def _normalize_security_code(cls, security: str) -> str:
@@ -142,10 +131,16 @@ class MiniQMTProvider(DataProvider):
         fmt = "%Y%m%d" if normalized == "1d" else "%Y%m%d%H%M%S"
         return dt.strftime(fmt)
 
-    def get_current_tick(self, security: str) -> Optional[Dict[str, Any]]:
+    def get_current_tick(
+        self,
+        security: str,
+        dt: Optional[Union[str, datetime]] = None,
+        df: bool = False,
+    ) -> Optional[Dict[str, Any]]:
         """
         返回简化 tick：last_price + 时间戳。优先调用 xtdata.get_last_quote，失败则回退到 1m K 线最新价。
         """
+        _ = dt, df
         try:
             xtdata = self._ensure_xtdata()
             code = self._normalize_security_code(security)
@@ -776,15 +771,6 @@ class MiniQMTProvider(DataProvider):
         events = self._get_xt_split_dividend(security, start_date=start_date, end_date=end_date)
         if events:
             return [self._standardize_event(event) for event in events]
-        helper = self._ensure_tushare_helper()
-        if helper:
-            try:
-                fallback = helper.get_split_dividend(security, start_date=start_date, end_date=end_date)
-                if fallback:
-                    return [self._standardize_event(event) for event in fallback]
-                return []
-            except Exception:
-                return []
         return []
 
     def _build_adjusted_from_events(
@@ -910,6 +896,25 @@ class MiniQMTProvider(DataProvider):
 
         return self._cache.cached_call("get_trade_days", kwargs, _fetch, result_type="list_date")
 
+    def get_trade_day(self, security: Union[str, List[str]], query_dt: Union[str, datetime]) -> Any:
+        try:
+            trade_days = self.get_trade_days(end_date=query_dt, count=1)
+        except Exception:
+            trade_days = []
+        if not trade_days:
+            last_day = None
+        else:
+            last_value = trade_days[-1]
+            try:
+                last_day = pd.to_datetime(last_value).date()
+            except Exception:
+                last_day = last_value
+        if isinstance(security, (list, tuple, set)):
+            securities = list(security)
+        else:
+            securities = [security]
+        return {str(sec): last_day for sec in securities}
+
     def get_all_securities(
         self,
         types: Union[str, List[str]] = "stock",
@@ -968,16 +973,17 @@ class MiniQMTProvider(DataProvider):
                 data = xt.get_index_stocks(normalized_symbol, date=target_date)
                 if data:
                     return [self._to_jq_code(code) for code in data]
-            helper = self._ensure_tushare_helper()
-            if helper:
-                stocks = helper.get_index_stocks(normalized_symbol, date=kw.get("date"))
-                return [self._to_jq_code(code) for code in stocks]
             return []
 
         return self._cache.cached_call("get_index_stocks", kwargs, _fetch, result_type="list_str")
 
-    def get_security_info(self, security: str) -> Dict[str, Any]:
+    def get_security_info(
+        self,
+        security: str,
+        date: Optional[Union[str, datetime]] = None,
+    ) -> Dict[str, Any]:
         xt = self._ensure_xtdata()
+        _ = date
         normalized = self._normalize_security_code(security)
         try:
             info = xt.get_instrument_detail(normalized)
@@ -1163,19 +1169,6 @@ class MiniQMTProvider(DataProvider):
                 end_date=kw.get("end_date"),
             )
             standardized = [self._standardize_event(event) for event in events]
-            if not standardized:
-                helper = self._ensure_tushare_helper()
-                if helper:
-                    try:
-                        fallback = helper.get_split_dividend(
-                            normalized_security,
-                            start_date=kw.get("start_date"),
-                            end_date=kw.get("end_date"),
-                        )
-                        if fallback:
-                            standardized = [self._standardize_event(event) for event in fallback]
-                    except Exception:
-                        standardized = []
             if not standardized:
                 return []
             adapted: List[Dict[str, Any]] = []

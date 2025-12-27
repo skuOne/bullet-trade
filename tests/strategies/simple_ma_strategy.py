@@ -58,11 +58,17 @@ def before_market_open(context):
     hs300_stocks = get_index_stocks('000300.XSHG')
     
     # 获取过去20天的成交额数据
+    # 注意：
+    # 1. 传入多个股票时，需要设置 panel=False 才能返回 DataFrame 格式
+    #    否则会返回 Panel 对象（已废弃），无法使用 groupby 操作
+    # 2. 开盘前不能获取当日的 money 字段数据（聚宽限制）
+    #    因此使用 end_date=context.previous_date 和 count，确保不包含当日数据
     df = get_price(
         hs300_stocks,
-        end_date=context.current_dt,
-        count=20,
-        fields=['money']
+        end_date=context.previous_date,  # 使用前一交易日作为结束日期
+        count=20,  # 从前一交易日往前推 20 条数据
+        fields=['money'],
+        panel=False  # 设置为 False 返回 DataFrame，包含 code 列
     )
     
     if df is not None and not df.empty:
@@ -88,9 +94,11 @@ def market_open(context):
     # 遍历股票池
     for stock in context.stock_pool:
         # 获取历史数据（需要足够的数据计算均线）
+        # 注意：盘中不能获取当日的 close 字段数据（聚宽限制）
+        # 因此使用 end_date=context.previous_date，确保不包含当日数据
         df = get_price(
             stock,
-            end_date=context.current_dt,
+            end_date=context.previous_date,  # 使用前一交易日作为结束日期
             count=context.ma_period + 1,
             fields=['close']
         )

@@ -282,12 +282,35 @@ class BacktestEngine:
         
         # 注入包装过的数据函数（支持真实价格和未来数据检测）
         module.get_price = wrapped_api.get_price
+        module.history = wrapped_api.history
         module.attribute_history = wrapped_api.attribute_history
+        module.get_bars = wrapped_api.get_bars
+        module.get_ticks = wrapped_api.get_ticks
+        module.get_current_tick = wrapped_api.get_current_tick
         module.get_current_data = wrapped_api.get_current_data
+        module.get_extras = wrapped_api.get_extras
+        module.get_fundamentals = wrapped_api.get_fundamentals
+        module.get_fundamentals_continuously = wrapped_api.get_fundamentals_continuously
         module.get_trade_days = wrapped_api.get_trade_days
+        module.get_trade_day = wrapped_api.get_trade_day
         module.get_all_securities = wrapped_api.get_all_securities
-        module.get_index_stocks = wrapped_api.get_index_stocks
         module.get_security_info = wrapped_api.get_security_info
+        module.get_fund_info = wrapped_api.get_fund_info
+        module.get_index_stocks = wrapped_api.get_index_stocks
+        module.get_index_weights = wrapped_api.get_index_weights
+        module.get_industry_stocks = wrapped_api.get_industry_stocks
+        module.get_industry = wrapped_api.get_industry
+        module.get_concept_stocks = wrapped_api.get_concept_stocks
+        module.get_concept = wrapped_api.get_concept
+        module.get_margincash_stocks = wrapped_api.get_margincash_stocks
+        module.get_marginsec_stocks = wrapped_api.get_marginsec_stocks
+        module.get_dominant_future = wrapped_api.get_dominant_future
+        module.get_future_contracts = wrapped_api.get_future_contracts
+        module.get_billboard_list = wrapped_api.get_billboard_list
+        module.get_locked_shares = wrapped_api.get_locked_shares
+        module.get_split_dividend = wrapped_api.get_split_dividend
+        module.set_data_provider = wrapped_api.set_data_provider
+        module.get_data_provider = wrapped_api.get_data_provider
         
         # 注入numpy和pandas
         module.np = np
@@ -322,12 +345,34 @@ class BacktestEngine:
         jq_mod.prettytable_print_df = prettytable_print_df
         # 数据 API（包装层）
         jq_mod.get_price = wrapped_api.get_price
+        jq_mod.history = wrapped_api.history
         jq_mod.attribute_history = wrapped_api.attribute_history
+        jq_mod.get_bars = wrapped_api.get_bars
+        jq_mod.get_ticks = wrapped_api.get_ticks
         jq_mod.get_current_data = wrapped_api.get_current_data
+        jq_mod.get_extras = wrapped_api.get_extras
+        jq_mod.get_fundamentals = wrapped_api.get_fundamentals
+        jq_mod.get_fundamentals_continuously = wrapped_api.get_fundamentals_continuously
         jq_mod.get_trade_days = wrapped_api.get_trade_days
+        jq_mod.get_trade_day = wrapped_api.get_trade_day
         jq_mod.get_all_securities = wrapped_api.get_all_securities
-        jq_mod.get_index_stocks = wrapped_api.get_index_stocks
         jq_mod.get_security_info = wrapped_api.get_security_info
+        jq_mod.get_fund_info = wrapped_api.get_fund_info
+        jq_mod.get_index_stocks = wrapped_api.get_index_stocks
+        jq_mod.get_index_weights = wrapped_api.get_index_weights
+        jq_mod.get_industry_stocks = wrapped_api.get_industry_stocks
+        jq_mod.get_industry = wrapped_api.get_industry
+        jq_mod.get_concept_stocks = wrapped_api.get_concept_stocks
+        jq_mod.get_concept = wrapped_api.get_concept
+        jq_mod.get_margincash_stocks = wrapped_api.get_margincash_stocks
+        jq_mod.get_marginsec_stocks = wrapped_api.get_marginsec_stocks
+        jq_mod.get_dominant_future = wrapped_api.get_dominant_future
+        jq_mod.get_future_contracts = wrapped_api.get_future_contracts
+        jq_mod.get_billboard_list = wrapped_api.get_billboard_list
+        jq_mod.get_locked_shares = wrapped_api.get_locked_shares
+        jq_mod.get_split_dividend = wrapped_api.get_split_dividend
+        jq_mod.set_data_provider = wrapped_api.set_data_provider
+        jq_mod.get_data_provider = wrapped_api.get_data_provider
         # 设置/参数 API
         jq_mod.set_benchmark = set_benchmark
         jq_mod.set_order_cost = set_order_cost
@@ -1772,11 +1817,15 @@ class BacktestEngine:
                         else:
                             # 对于单个字段，列名就是标的代码
                             # 对于多个字段，列名是MultiIndex
+                            # 对于单证券多字段，列名是字段名（如 ['open', 'close']）
                             if security in df.columns:
                                 close_price = last_row[security]
                             elif ('close', security) in df.columns:
                                 # MultiIndex格式
                                 close_price = last_row[('close', security)]
+                            elif 'close' in df.columns:
+                                # 单证券多字段格式：列名是字段名
+                                close_price = last_row['close']
                             else:
                                 log.error(f"{security} 无法匹配收盘价列，列={list(df.columns)}")
                                 continue

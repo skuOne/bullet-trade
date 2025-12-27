@@ -254,16 +254,24 @@ class JQDataProvider(DataProvider):
 
         return self._cache.cached_call('get_price', kwargs, _fetch_price, result_type='df')
 
-    def get_security_info(self, security: str) -> Dict[str, Any]:
+    def get_security_info(
+        self,
+        security: str,
+        date: Optional[Union[str, datetime]] = None,
+    ) -> Dict[str, Any]:
         if not security:
             return {}
-        cached = self._security_info_cache.get(security)
+        cache_key = (security, date) if date is not None else (security, None)
+        cached = self._security_info_cache.get(cache_key)
         if cached is not None:
             return cached
 
         result: Dict[str, Any] = {}
         try:
-            sec_info = jq.get_security_info(security)
+            if date is not None:
+                sec_info = jq.get_security_info(security, date=date)
+            else:
+                sec_info = jq.get_security_info(security)
         except Exception as exc:
             logger.debug("Failed to fetch security info for %s: %s", security, exc)
             sec_info = None
@@ -298,7 +306,7 @@ class JQDataProvider(DataProvider):
             if inferred:
                 result['subtype'] = inferred
 
-        self._security_info_cache[security] = result
+        self._security_info_cache[cache_key] = result
         return result
 
     def _infer_fund_subtype(self, security: str) -> Optional[str]:
@@ -329,6 +337,8 @@ class JQDataProvider(DataProvider):
     def get_trade_days(self, start_date: Optional[Union[str, datetime]] = None,
                         end_date: Optional[Union[str, datetime]] = None,
                         count: Optional[int] = None) -> List[datetime]:
+        if start_date is None and end_date is None and count is None:
+            end_date = Date.today()
         kwargs = {
             'start_date': start_date,
             'end_date': end_date,
@@ -362,6 +372,188 @@ class JQDataProvider(DataProvider):
             return jq.get_index_stocks(kw.get('index_symbol'), date=kw.get('date'))
 
         return self._cache.cached_call('get_index_stocks', kwargs, _fetch, result_type='list_str')
+
+    def get_bars(
+        self,
+        security: Union[str, List[str]],
+        count: int,
+        unit: str = '1d',
+        fields: Optional[List[str]] = None,
+        include_now: bool = False,
+        end_dt: Optional[Union[str, datetime]] = None,
+        fq_ref_date: Union[int, datetime] = 1,
+        df: bool = False,
+    ) -> Any:
+        return jq.get_bars(
+            security,
+            count=count,
+            unit=unit,
+            fields=fields,
+            include_now=include_now,
+            end_dt=end_dt,
+            fq_ref_date=fq_ref_date,
+            df=df,
+        )
+
+    def get_ticks(
+        self,
+        security: str,
+        end_dt: Union[str, datetime],
+        start_dt: Optional[Union[str, datetime]] = None,
+        count: Optional[int] = None,
+        fields: Optional[List[str]] = None,
+        skip: bool = False,
+        df: bool = False,
+    ) -> Any:
+        return jq.get_ticks(
+            security,
+            start_dt=start_dt,
+            end_dt=end_dt,
+            count=count,
+            fields=fields,
+            skip=skip,
+            df=df,
+        )
+
+    def get_current_tick(
+        self,
+        security: str,
+        dt: Optional[Union[str, datetime]] = None,
+        df: bool = False,
+    ) -> Any:
+        tick = jq.get_current_tick(security)
+        if not df:
+            return tick
+        if tick is None:
+            return pd.DataFrame()
+        if isinstance(tick, pd.DataFrame):
+            return tick
+        if isinstance(tick, dict):
+            return pd.DataFrame([tick])
+        try:
+            return pd.DataFrame([vars(tick)])
+        except Exception:
+            return pd.DataFrame([{'value': tick}])
+
+    def get_extras(
+        self,
+        info: str,
+        security_list: List[str],
+        start_date: Optional[Union[str, datetime]] = None,
+        end_date: Optional[Union[str, datetime]] = None,
+        df: bool = True,
+        count: Optional[int] = None,
+    ) -> Any:
+        return jq.get_extras(
+            info,
+            security_list,
+            start_date=start_date,
+            end_date=end_date,
+            df=df,
+            count=count,
+        )
+
+    def get_fundamentals(
+        self,
+        query_object: Any,
+        date: Optional[Union[str, datetime]] = None,
+        statDate: Optional[str] = None,
+    ) -> Any:
+        return jq.get_fundamentals(query_object, date=date, statDate=statDate)
+
+    def get_fundamentals_continuously(
+        self,
+        query_object: Any,
+        end_date: Optional[Union[str, datetime]] = None,
+        count: int = 1,
+        panel: bool = True,
+    ) -> Any:
+        return jq.get_fundamentals_continuously(query_object, end_date=end_date, count=count, panel=panel)
+
+    def get_index_weights(self, index_id: str, date: Optional[Union[str, datetime]] = None) -> Any:
+        return jq.get_index_weights(index_id, date=date)
+
+    def get_industry_stocks(self, industry_code: str, date: Optional[Union[str, datetime]] = None) -> List[str]:
+        return jq.get_industry_stocks(industry_code, date=date)
+
+    def get_industry(self, security: Union[str, List[str]], date: Optional[Union[str, datetime]] = None) -> Any:
+        security = jq.utils.convert_security(security)
+        date_str = jq.utils.to_date_str(date) if date is not None else None
+        try:
+            return jq.client.JQDataClient.instance().get_industry(security=security, date=date_str)
+        except TypeError:
+            return jq.get_industry(security, date=date)
+
+    def get_concept_stocks(self, concept_code: str, date: Optional[Union[str, datetime]] = None) -> List[str]:
+        return jq.get_concept_stocks(concept_code, date=date)
+
+    def get_concept(self, security: Union[str, List[str]], date: Optional[Union[str, datetime]] = None) -> Any:
+        return jq.get_concept(security, date=date)
+
+    def get_fund_info(self, security: str, date: Optional[Union[str, datetime]] = None) -> Any:
+        return jq.get_fund_info(security, date=date)
+
+    def get_margincash_stocks(self, date: Optional[Union[str, datetime]] = None) -> Any:
+        return jq.get_margincash_stocks(date)
+
+    def get_marginsec_stocks(self, date: Optional[Union[str, datetime]] = None) -> Any:
+        return jq.get_marginsec_stocks(date)
+
+    def get_dominant_future(self, underlying_symbol: str, date: Optional[Union[str, datetime]] = None) -> Any:
+        query_date = date or datetime.now()
+        return jq.get_dominant_future(underlying_symbol, date=query_date)
+
+    def get_future_contracts(self, underlying_symbol: str, date: Optional[Union[str, datetime]] = None) -> Any:
+        query_date = date or datetime.now()
+        return jq.get_future_contracts(underlying_symbol, date=query_date)
+
+    def get_billboard_list(
+        self,
+        stock_list: Optional[List[str]] = None,
+        start_date: Optional[Union[str, datetime]] = None,
+        end_date: Optional[Union[str, datetime]] = None,
+        count: Optional[int] = None,
+    ) -> Any:
+        if start_date is None and count is None and end_date is not None:
+            start_date = end_date
+        start_str = jq.utils.to_date_str(start_date) if start_date is not None else None
+        end_str = jq.utils.to_date_str(end_date) if end_date is not None else None
+        return jq.get_billboard_list(stock_list=stock_list, start_date=start_str, end_date=end_str, count=count)
+
+    def get_locked_shares(
+        self,
+        stock_list: List[str],
+        start_date: Optional[Union[str, datetime]] = None,
+        end_date: Optional[Union[str, datetime]] = None,
+        forward_count: Optional[int] = None,
+    ) -> Any:
+        start_str = jq.utils.to_date_str(start_date) if start_date is not None else None
+        end_str = jq.utils.to_date_str(end_date) if end_date is not None else None
+        return jq.get_locked_shares(
+            stock_list, start_date=start_str, end_date=end_str, forward_count=forward_count
+        )
+
+    def get_trade_day(self, security: Union[str, List[str]], query_dt: Union[str, datetime]) -> Any:
+        if hasattr(jq, 'get_trade_day'):
+            return jq.get_trade_day(security, query_dt)
+        try:
+            trade_days = jq.get_trade_days(end_date=query_dt, count=1)
+        except Exception:
+            trade_days = []
+        if trade_days is None or len(trade_days) == 0:
+            last_day = None
+        else:
+            last_value = trade_days[-1]
+            try:
+                last_day = pd.to_datetime(last_value).date()
+            except Exception:
+                last_day = last_value
+
+        if isinstance(security, (list, tuple, set)):
+            securities = list(security)
+        else:
+            securities = [security]
+        return {str(sec): last_day for sec in securities}
 
     # ------------------------ Live 快照 ------------------------
     def get_live_current(self, security: str) -> Dict[str, Any]:

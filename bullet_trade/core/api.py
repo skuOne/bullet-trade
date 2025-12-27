@@ -35,16 +35,19 @@ from .models import (
 
 # 导入数据API
 from ..data.api import (
-    get_price, attribute_history,
-    get_current_data,
-    get_trade_days, get_all_securities,
-    get_index_stocks,
-    get_split_dividend,
-    set_data_provider, get_data_provider
+    get_price, history, attribute_history, get_bars, get_ticks,
+    get_current_data, get_extras, get_fundamentals, get_fundamentals_continuously,
+    get_trade_days, get_trade_day, get_all_securities, get_security_info, get_fund_info,
+    get_index_stocks, get_index_weights, get_industry_stocks, get_industry,
+    get_concept_stocks, get_concept, get_margincash_stocks, get_marginsec_stocks,
+    get_dominant_future, get_future_contracts, get_billboard_list, get_locked_shares,
+    get_split_dividend, set_data_provider, get_data_provider
 )
+from ..data.api import get_current_tick as _data_get_current_tick
 from ..research.io import read_file, write_file
 
 # ---- Tick 订阅占位（后续与 QMT 对接完善） ----
+from datetime import datetime
 from typing import Union, Sequence, Any, Optional, Set, Callable, Dict
 import threading
 # 订阅注册表（占位）：记录策略声明过的订阅标的
@@ -221,41 +224,18 @@ def unsubscribe_all() -> None:
     return None
 
 
-def get_current_tick(security: str) -> Optional[dict]:
+def get_current_tick(
+    security: str,
+    dt: Optional[Union[str, datetime]] = None,
+    df: bool = False,
+) -> Optional[dict]:
     """
-    获取最新 tick 快照（最小实现）。
-    在存在 xtquant/xtdata 环境时，调用 xtdata.get_full_tick([code]) 返回最新快照；
-    否则返回 None（不报错）。
+    获取最新 tick 快照（聚宽风格）。
     """
-
     engine = _current_live_engine()
-
-    if engine:
-
-        return engine.get_current_tick_snapshot(security)
-
-
-    try:
-        # 延迟导入，避免无环境时报错
-        from xtquant import xtdata  # type: ignore
-    except Exception:
-        return None
-
-    try:
-        mapped = _to_qmt_code(security)
-        data = xtdata.get_full_tick([mapped])  # type: ignore
-        tick = data.get(mapped) if isinstance(data, dict) else None
-        if not tick:
-            return None
-        # 统一最小字段
-        result = {
-            'sid': security,
-            'last_price': tick.get('lastPrice'),
-            'dt': tick.get('time') or tick.get('datetime') or None,
-        }
-        return result
-    except Exception:
-        return None
+    if engine and hasattr(engine, "get_current_tick_snapshot"):
+        return engine.get_current_tick_snapshot(security)  # type: ignore[no-any-return]
+    return _data_get_current_tick(security, dt=dt, df=df)
 
 
 def set_tick_handler(handler: Callable[[Any, Dict[str, Any]], None]) -> None:
@@ -455,13 +435,17 @@ __all__ = [
     'Trade', 'Order', 'OrderStatus', 'OrderStyle', 'SecurityUnitData',
     
     # 数据API
-    'get_price', 'attribute_history',
-    'get_current_data',
-    'get_trade_days', 'get_all_securities',
-    'get_index_stocks',
+    'get_price', 'history', 'attribute_history', 'get_bars', 'get_ticks', 'get_current_tick',
+    'get_current_data', 'get_extras', 'get_fundamentals', 'get_fundamentals_continuously',
+    'get_trade_days', 'get_trade_day', 'get_all_securities', 'get_security_info', 'get_fund_info',
+    'get_index_stocks', 'get_index_weights',
+    'get_industry_stocks', 'get_industry', 'get_concept_stocks', 'get_concept',
+    'get_margincash_stocks', 'get_marginsec_stocks',
+    'get_dominant_future', 'get_future_contracts',
+    'get_billboard_list', 'get_locked_shares',
     'get_split_dividend',
     'set_data_provider', 'get_data_provider',
     'read_file', 'write_file',
     # Tick 订阅占位
-    'subscribe', 'unsubscribe', 'unsubscribe_all', 'get_current_tick',
+    'subscribe', 'unsubscribe', 'unsubscribe_all',
 ]

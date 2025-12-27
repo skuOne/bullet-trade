@@ -63,7 +63,7 @@ def _create_provider(provider_name: Optional[str] = None, overrides: Optional[Di
 
 _provider: DataProvider = _create_provider()
 _auth_attempted = False
-_security_info_cache: Dict[str, "SecurityInfo"] = {}
+_security_info_cache: Dict[Any, "SecurityInfo"] = {}
 _security_overrides_loaded = False
 _security_overrides: Dict[str, Any] = {}
 
@@ -476,6 +476,124 @@ def _get_setting(key: str, default: Any = False) -> Any:
     return get_settings().options.get(key, default)
 
 
+def _should_avoid_future() -> bool:
+    return bool(_current_context and _get_setting('avoid_future_data'))
+
+
+def _coerce_datetime(value: Any) -> Optional[datetime]:
+    if value in (None, "", "NaT"):
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, Date) and not isinstance(value, datetime):
+        return datetime.combine(value, Time(0, 0))
+    try:
+        parsed = pd.to_datetime(value)
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    if isinstance(parsed, pd.Timestamp):
+        return parsed.to_pydatetime()
+    return None
+
+
+def _resolve_context_dt(value: Any, default_to_context: bool = True) -> Optional[datetime]:
+    dt = _coerce_datetime(value)
+    if dt is None and default_to_context and _current_context:
+        return _current_context.current_dt
+    return dt
+
+
+def _resolve_context_date(value: Any, default_to_context: bool = True) -> Optional[Date]:
+    if value is None and default_to_context and _current_context:
+        return _current_context.current_dt.date()
+    return _coerce_date(value) if value is not None else None
+
+
+def _ensure_not_future_dt(value: Optional[datetime], label: str) -> Optional[datetime]:
+    if not _should_avoid_future() or value is None:
+        return value
+    current_dt = _current_context.current_dt
+    if value > current_dt:
+        raise FutureDataError(
+            f"avoid_future_data=True时，{label}({value})不能大于当前时间({current_dt})"
+        )
+    return value
+
+
+def _ensure_not_future_date(value: Optional[Date], label: str) -> Optional[Date]:
+    if not _should_avoid_future() or value is None:
+        return value
+    current_date = _current_context.current_dt.date()
+    if value > current_date:
+        raise FutureDataError(
+            f"avoid_future_data=True时，{label}({value})不能大于当前日期({current_date})"
+        )
+    return value
+
+
+_HISTORY_VIEW_UNSUPPORTED: Dict[str, set] = {
+    "miniqmt": {"get_all_securities"},
+    "qmt-remote": {"get_all_securities"},
+}
+
+
+def _ensure_history_view(api_name: str, date_value: Optional[Date]) -> None:
+    if not _current_context or _is_live_mode():
+        return
+    if date_value is None:
+        return
+    provider_name = getattr(_provider, "name", "")
+    unsupported = _HISTORY_VIEW_UNSUPPORTED.get(provider_name, set())
+    if api_name in unsupported:
+        raise UserError(f"{provider_name} 数据源不支持 {api_name} 的历史视角，回测中不可用")
+
+
+def _raise_if_not_implemented(error: Exception) -> None:
+    if isinstance(error, NotImplementedError):
+        raise
+
+
+def _query_mentions_valuation(query_object: Any) -> bool:
+    """
+    粗略判断查询是否涉及估值表，用于回测时间防护。
+    """
+    if query_object is None:
+        return False
+    try:
+        text = str(query_object).lower()
+    except Exception:
+        return False
+    return 'valuation' in text or 'stock_valuation' in text
+
+
+def _is_permission_error(error: Exception) -> bool:
+    message = str(error)
+    if not message:
+        return False
+    lowered = message.lower()
+    return 'method not allowed' in lowered or 'permission' in lowered or '权限' in message
+
+
+def _raise_permission_error(error: Exception, api_name: str) -> None:
+    if _is_permission_error(error):
+        raise UserError(f"{api_name} 权限不足: {error}") from error
+
+
+def _is_sql_unsupported(error: Exception) -> bool:
+    message = str(error)
+    lowered = message.lower()
+    if 'sql' not in lowered and 'sql' not in message:
+        return False
+    if 'unexpected keyword argument' in lowered:
+        return True
+    if 'unsupported' in lowered or 'not allowed' in lowered:
+        return True
+    if '不接受' in message or '不支持' in message or '只支持' in message:
+        return True
+    return False
+
 def _coerce_date(value: Any) -> Optional[Date]:
     if value in (None, "", "NaT"):
         return None
@@ -522,7 +640,7 @@ def _normalize_security_info(security: str, raw_info: Any) -> Dict[str, Any]:
     return normalized
 
 
-def get_security_info(security: str) -> SecurityInfo:
+def get_security_info(security: str, date: Optional[Union[str, datetime]] = None) -> SecurityInfo:
     """
     获取标的的基础信息（如类型、子类型），结果会缓存。
     若当前数据源不支持，返回空对象。
@@ -530,7 +648,11 @@ def get_security_info(security: str) -> SecurityInfo:
     if not security:
         return SecurityInfo('', {})
 
-    cached = _security_info_cache.get(security)
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_security_info.date")
+    cache_key = (security, resolved_date)
+
+    cached = _security_info_cache.get(cache_key)
     if cached is not None:
         return cached
 
@@ -539,11 +661,14 @@ def get_security_info(security: str) -> SecurityInfo:
     info_fn = getattr(_provider, 'get_security_info', None)
     if not callable(info_fn):
         empty = SecurityInfo(security, {})
-        _security_info_cache[security] = empty
+        _security_info_cache[cache_key] = empty
         return empty
 
     try:
-        raw_info = info_fn(security)
+        try:
+            raw_info = info_fn(security, date=resolved_date)
+        except TypeError:
+            raw_info = info_fn(security)
     except Exception as exc:
         log.debug(f"获取{security}基本信息失败: {exc}")
         raw_info = {}
@@ -552,7 +677,7 @@ def get_security_info(security: str) -> SecurityInfo:
     # 应用配置覆盖（分类/tplus/slippage等）
     normalized = _merge_overrides(security, normalized)
     info_obj = SecurityInfo(security, normalized)
-    _security_info_cache[security] = info_obj
+    _security_info_cache[cache_key] = info_obj
     return info_obj
 
 
@@ -647,6 +772,16 @@ def get_price(
     # 确保数据提供者已认证
     _ensure_auth()
     
+    # 警告：panel=True 已废弃，与聚宽官方保持一致
+    # 聚宽官方提示：不建议继续使用panel（panel将在pandas未来版本不再支持，将来升级pandas后，您的策略会失败）
+    if panel:
+        import warnings
+        warnings.warn(
+            "不建议继续使用panel（panel将在pandas未来版本不再支持，将来升级pandas后，您的策略会失败），"
+            "建议 get_price 传入 panel=False 参数",
+            UserWarning
+        )
+    
     if not _current_context:
         # 没有回测上下文，直接调用原始API
         return _provider.get_price(
@@ -665,15 +800,26 @@ def get_price(
     avoid_future = _get_setting('avoid_future_data')
     use_real_price = _get_setting('use_real_price')
     
-    # 处理 end_date
+    current_dt = _current_context.current_dt
+    
+    # 检查参数冲突：start_date 和 count 不能同时使用（与聚宽保持一致）
+    if count is not None and start_date is not None:
+        raise UserError("get_price 不能同时指定 start_date 和 count 两个参数")
+    
+    # 处理 end_date 的默认值（与聚宽保持一致）
+    # 聚宽官方：如果没有提供 end_date，默认是 datetime.datetime(2015, 12, 31)
+    # 但如果提供了 count，end_date 应该默认为 current_dt（从当前时间往前推）
     if end_date is None:
-        end_date = datetime(2030, 12, 31)  # 默认一个很远的未来日期
+        if count is not None:
+            # 使用 count 时，end_date 默认为当前时间（从当前时间往前推 count 条数据）
+            end_date = current_dt
+        else:
+            # 没有 count 时，使用聚宽的默认值（过去的日期）
+            end_date = datetime(2015, 12, 31)
     elif isinstance(end_date, str):
         end_date = pd.to_datetime(end_date)
     elif isinstance(end_date, Date) and not isinstance(end_date, datetime):
         end_date = datetime.combine(end_date, Time(15, 0))
-    
-    current_dt = _current_context.current_dt
     
     # 标准化频率
     frequency_map = {'daily': '1d', 'minute': '1m'}
@@ -707,7 +853,9 @@ def get_price(
     end_date = min(end_date, current_dt)
     
     # 真实价格模式：使用当前回测时间作为复权参考日期
-    if use_real_price and fq == 'pre':
+    # 注意：当 panel=False 时跳过真实价格模式，因为 get_price_engine 不支持 panel 参数
+    # 此时直接使用标准的 get_price，它正确支持 panel=False 返回长表格式
+    if use_real_price and fq == 'pre' and panel:
         # 使用当前回测日期作为复权参考日期，以获得当时的真实价格
         
         # 确保 pre_factor_ref_date 是 datetime.date 类型
@@ -740,10 +888,16 @@ def get_price(
                 pre_factor_ref_date=pre_factor_ref_date
             )
             #log.debug(f"provider.get_price 返回: {type(result)}, {result.shape if hasattr(result, 'shape') else 'No shape'}")
+            # 如果 panel=False 且返回的是长表格式（包含 time 和 code 列），直接返回，不进行转换
+            # 这样可以保持与聚宽官方一致的行为，支持 df.groupby('code') 等操作
+            # 注意：必须在 _coerce_price_result_to_dataframe 之前检查，否则会被转换成宽表
+            if not panel and isinstance(result, pd.DataFrame) and 'time' in result.columns and 'code' in result.columns:
+                return result
             df = _coerce_price_result_to_dataframe(result)
             return _make_compatible_dataframe(df, fields)
             
         except Exception as e:
+            _raise_if_not_implemented(e)
             log.warning(f"真实价格模式调用失败: {e}，回退到标准复权")
     
     # 标准模式或真实价格模式失败时的回退策略
@@ -761,10 +915,21 @@ def get_price(
             fill_paused=fill_paused
         )
         
+        # 调试日志：查看返回的数据格式
+        log.debug(f"get_price 返回: panel={panel}, type={type(df)}, "
+                  f"columns={list(df.columns) if isinstance(df, pd.DataFrame) else 'N/A'}, "
+                  f"shape={df.shape if hasattr(df, 'shape') else 'N/A'}")
+        
+        # 如果 panel=False 且返回的是长表格式（包含 time 和 code 列），直接返回，不进行转换
+        # 这样可以保持与聚宽官方一致的行为，支持 df.groupby('code') 等操作
+        if not panel and isinstance(df, pd.DataFrame) and 'time' in df.columns and 'code' in df.columns:
+            return df
+        
         # 兼容性处理：让多证券情况下也能通过 df['close'] 访问
         return _make_compatible_dataframe(df, fields)
         
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.error(f"获取价格数据失败: {e}")
         return pd.DataFrame()
 
@@ -837,7 +1002,9 @@ def _make_compatible_dataframe(df: pd.DataFrame, fields: Optional[List[str]]) ->
             return df
 
     # 情况3：普通列，但为多证券+单字段（列是证券代码集合）
-    if fields and len(fields) == 1 and df.shape[1] > 1:
+    # 注意：需要排除列名是已知字段名的情况，避免把字段名误当成证券代码
+    cols_set = set(map(str, df.columns))
+    if fields and len(fields) == 1 and df.shape[1] > 1 and not (cols_set & known_fields):
         try:
             df.columns = pd.MultiIndex.from_product(
                 [fields, list(map(str, df.columns))], names=['field', 'code']
@@ -925,8 +1092,6 @@ def attribute_history(
         end_date = _current_context.current_dt
         if 'm' in unit:
             end_date = end_date + timedelta(minutes=1)
-        elif 'd' in unit:
-            end_date = end_date - timedelta(days=1)
 
     frequency = 'daily' if 'd' in unit else 'minute'
 
@@ -941,8 +1106,625 @@ def attribute_history(
             count=count
         )
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.error(f"获取历史数据失败: {e}")
         return pd.DataFrame() if df else {}
+
+
+def history(
+    count: int,
+    unit: str = '1d',
+    field: Union[str, List[str]] = 'avg',
+    security_list: Optional[Union[str, List[str]]] = None,
+    df: bool = True,
+    skip_paused: bool = False,
+    fq: str = 'pre',
+) -> Any:
+    """
+    获取多个标的历史数据（聚宽风格）。
+    """
+    if security_list is None:
+        universe = _get_setting('universe', None)
+        if universe:
+            security_list = list(universe)
+        else:
+            raise UserError("history 需要提供 security_list 或先设置 universe")
+
+    fields = [field] if isinstance(field, str) else list(field)
+
+    end_dt = _resolve_context_dt(None, default_to_context=True)
+    if end_dt is None:
+        end_dt = datetime.now()
+    if 'm' in unit:
+        end_dt = end_dt + timedelta(minutes=1)
+    elif 'd' in unit:
+        end_dt = end_dt - timedelta(days=1)
+
+    frequency = 'daily' if 'd' in unit else 'minute'
+    result = get_price(
+        security=security_list,
+        end_date=end_dt,
+        frequency=frequency,
+        fields=fields,
+        skip_paused=skip_paused,
+        fq=fq,
+        count=count,
+        panel=df,
+    )
+    if df or not isinstance(result, pd.DataFrame):
+        return result
+    return result.to_dict()
+
+
+def get_bars(
+    security: Union[str, List[str]],
+    count: int,
+    unit: str = '1d',
+    fields: Union[List[str], tuple] = ('date', 'open', 'high', 'low', 'close'),
+    include_now: bool = False,
+    end_dt: Optional[Union[str, datetime]] = None,
+    fq_ref_date: Union[int, datetime, Date, None] = 1,
+    df: bool = False,
+) -> Any:
+    """
+    获取 K 线数据（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_end = _resolve_context_dt(end_dt, default_to_context=True)
+    if resolved_end is None:
+        resolved_end = datetime.now()
+    resolved_end = _ensure_not_future_dt(resolved_end, "get_bars.end_dt")
+
+    if fq_ref_date == 1:
+        fq_ref_date = _current_context.current_dt.date() if _current_context else Date.today()
+    elif isinstance(fq_ref_date, datetime):
+        fq_ref_date = fq_ref_date.date()
+    elif fq_ref_date is not None and not isinstance(fq_ref_date, Date):
+        raise UserError("fq_ref_date 必须为 None 或 datetime.date 类型")
+
+    try:
+        return _provider.get_bars(
+            security=security,
+            count=count,
+            unit=unit,
+            fields=list(fields) if isinstance(fields, tuple) else fields,
+            include_now=include_now,
+            end_dt=resolved_end,
+            fq_ref_date=fq_ref_date,
+            df=df,
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取 K 线数据失败: {e}")
+        try:
+            freq = 'daily' if 'd' in unit else 'minute'
+            fallback_fields = None
+            if fields is not None:
+                fallback_fields = [f for f in fields if f != 'date']
+            fallback = get_price(
+                security=security,
+                end_date=resolved_end,
+                frequency=freq,
+                fields=fallback_fields,
+                count=count,
+                panel=True,
+            )
+            if df or not isinstance(fallback, pd.DataFrame):
+                return fallback
+            return fallback.to_records(index=False)
+        except Exception:
+            return pd.DataFrame() if df else []
+
+
+def get_ticks(
+    security: str,
+    end_dt: Optional[Union[str, datetime]] = None,
+    start_dt: Optional[Union[str, datetime]] = None,
+    count: Optional[int] = None,
+    fields: Optional[List[str]] = None,
+    skip: bool = True,
+    df: bool = False,
+) -> Any:
+    """
+    获取 tick 数据（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_end = _resolve_context_dt(end_dt, default_to_context=True)
+    if resolved_end is None:
+        raise UserError("get_ticks 需要提供 end_dt 或在回测上下文中调用")
+    resolved_end = _ensure_not_future_dt(resolved_end, "get_ticks.end_dt")
+    resolved_start = _resolve_context_dt(start_dt, default_to_context=False)
+    if resolved_start is None and count is None:
+        count = 1
+
+    try:
+        return _provider.get_ticks(
+            security=security,
+            end_dt=resolved_end,
+            start_dt=resolved_start,
+            count=count,
+            fields=fields,
+            skip=skip,
+            df=df,
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取 tick 数据失败: {e}")
+        return pd.DataFrame() if df else []
+
+
+def get_current_tick(
+    security: str,
+    dt: Optional[Union[str, datetime]] = None,
+    df: bool = False,
+) -> Any:
+    """
+    获取最新 tick 快照（聚宽风格）。
+    """
+    _ensure_auth()
+    target_dt = _resolve_context_dt(dt, default_to_context=True)
+    if target_dt is None:
+        target_dt = datetime.now()
+    target_dt = _ensure_not_future_dt(target_dt, "get_current_tick.dt")
+
+    use_price_proxy = bool(
+        _current_context
+        and not _is_live_mode()
+        and getattr(_provider, 'name', '') == 'jqdatasdk'
+    )
+
+    if use_price_proxy:
+        try:
+            price_df = get_price(
+                security=security,
+                end_date=target_dt,
+                frequency='minute',
+                fields=['close'],
+                count=1,
+                panel=False,
+            )
+            close_value = None
+            tick_time = target_dt
+            series = None
+            if isinstance(price_df, pd.DataFrame) and not price_df.empty:
+                if isinstance(price_df.columns, pd.MultiIndex):
+                    if ('close', security) in price_df.columns:
+                        series = price_df[('close', security)]
+                    elif (security, 'close') in price_df.columns:
+                        series = price_df[(security, 'close')]
+                    else:
+                        for col in price_df.columns:
+                            if isinstance(col, tuple) and 'close' in col:
+                                series = price_df[col]
+                                break
+                elif 'close' in price_df.columns:
+                    series = price_df['close']
+            if series is not None and len(series) > 0:
+                close_value = series.iloc[-1]
+                if isinstance(series.index, pd.DatetimeIndex) and len(series.index) > 0:
+                    tick_time = series.index[-1]
+
+            if close_value is None or (isinstance(close_value, float) and pd.isna(close_value)):
+                return pd.DataFrame() if df else None
+
+            tick = {
+                'security': security,
+                'datetime': tick_time,
+                'current': float(close_value),
+                'last_price': float(close_value),
+            }
+            return pd.DataFrame([tick]) if df else tick
+        except Exception as e:
+            log.error(f"回测 get_current_tick 使用分钟线失败: {e}")
+            return pd.DataFrame() if df else None
+
+    try:
+        result = _provider.get_current_tick(security, dt=target_dt, df=df)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取 tick 快照失败: {e}")
+        result = None
+
+    if _is_live_mode() and getattr(_provider, 'requires_live_data', False) and not result:
+        provider_name = getattr(_provider, 'name', 'unknown')
+        raise RuntimeError(f"数据源 {provider_name} 未返回实时 tick，请检查行情订阅/连接")
+    return result
+
+
+def get_extras(
+    info: str,
+    security_list: List[str],
+    start_date: Optional[Union[str, datetime]] = None,
+    end_date: Optional[Union[str, datetime]] = None,
+    df: bool = True,
+    count: Optional[int] = None,
+) -> Any:
+    """
+    获取扩展数据（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_start = _resolve_context_date(start_date, default_to_context=False)
+    resolved_end = _resolve_context_date(end_date, default_to_context=True)
+    resolved_end = _ensure_not_future_date(resolved_end, "get_extras.end_date")
+
+    if _should_avoid_future() and resolved_end and _current_context:
+        current_date = _current_context.current_dt.date()
+        if resolved_end == current_date and info != 'is_st':
+            if _current_context.current_dt.time() < Time(15, 0):
+                raise FutureDataError(
+                    f"avoid_future_data=True时，回测中get_extras只能在收盘后才能取{info}数据，"
+                    f"current_dt={_current_context.current_dt}"
+                )
+
+    if resolved_start is None and count is None:
+        resolved_start = Date(2015, 1, 1)
+
+    if isinstance(security_list, str):
+        security_list = [security_list]
+    try:
+        return _provider.get_extras(
+            info,
+            security_list,
+            start_date=resolved_start,
+            end_date=resolved_end,
+            df=df,
+            count=count,
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取扩展数据失败: {e}")
+        return pd.DataFrame() if df else {}
+
+
+def get_fundamentals(
+    query_object: Any,
+    date: Optional[Union[str, datetime]] = None,
+    statDate: Optional[str] = None,
+) -> Any:
+    """
+    获取财务数据（聚宽风格）。
+    """
+    _ensure_auth()
+    if date is not None and statDate is not None:
+        raise UserError("get_fundamentals 只允许传入 date 或 statDate 中的一个")
+
+    if _should_avoid_future() and statDate is not None:
+        raise FutureDataError("avoid_future_data=True时，get_fundamentals 不支持 statDate 参数")
+
+    if date is None and statDate is None:
+        if _current_context:
+            resolved_date = _current_context.current_dt.date() - timedelta(days=1)
+        else:
+            resolved_date = Date.today() - timedelta(days=1)
+    else:
+        resolved_date = _resolve_context_date(date, default_to_context=False)
+
+    if resolved_date is not None:
+        yesterday = Date.today() - timedelta(days=1)
+        if resolved_date > yesterday:
+            resolved_date = yesterday
+
+    resolved_date = _ensure_not_future_date(resolved_date, "get_fundamentals.date")
+    if _should_avoid_future() and resolved_date and _current_context:
+        if resolved_date == _current_context.current_dt.date() and _query_mentions_valuation(query_object):
+            if _current_context.current_dt.time() < Time(15, 0):
+                raise FutureDataError(
+                    "avoid_future_data=True时，回测中get_fundamentals取估值表数据需在15:00之后"
+                )
+    try:
+        return _provider.get_fundamentals(query_object, date=resolved_date, statDate=statDate)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取财务数据失败: {e}")
+        return pd.DataFrame()
+
+
+def get_fundamentals_continuously(
+    query_object: Any,
+    end_date: Optional[Union[str, datetime]] = None,
+    count: int = 1,
+    panel: bool = True,
+) -> Any:
+    """
+    获取连续财务数据（聚宽风格）。
+    """
+    _ensure_auth()
+    if end_date is None:
+        if _current_context:
+            end_date = _current_context.current_dt.date() - timedelta(days=1)
+        else:
+            end_date = Date.today() - timedelta(days=1)
+    resolved_end = _resolve_context_date(end_date, default_to_context=False)
+    resolved_end = _ensure_not_future_date(resolved_end, "get_fundamentals_continuously.end_date")
+    if _should_avoid_future() and resolved_end and _current_context:
+        if resolved_end == _current_context.current_dt.date() and _query_mentions_valuation(query_object):
+            if _current_context.current_dt.time() < Time(15, 0):
+                raise FutureDataError(
+                    "avoid_future_data=True时，回测中get_fundamentals_continuously取估值表数据需在15:00之后"
+                )
+    try:
+        return _provider.get_fundamentals_continuously(
+            query_object, end_date=resolved_end, count=count, panel=panel
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        if _is_sql_unsupported(e):
+            return _fallback_fundamentals_continuously(query_object, resolved_end, count, panel)
+        _raise_permission_error(e, "get_fundamentals_continuously")
+        log.error(f"获取连续财务数据失败: {e}")
+        return pd.DataFrame()
+
+
+def _fallback_fundamentals_continuously(
+    query_object: Any,
+    end_date: Optional[Date],
+    count: int,
+    panel: bool,
+) -> pd.DataFrame:
+    trade_days = get_trade_days(end_date=end_date, count=count)
+    if not trade_days:
+        return pd.DataFrame()
+
+    frames: List[pd.DataFrame] = []
+    for day in trade_days:
+        day_date = pd.to_datetime(day).date()
+        try:
+            df = _provider.get_fundamentals(query_object, date=day_date, statDate=None)
+        except Exception as exc:
+            _raise_if_not_implemented(exc)
+            _raise_permission_error(exc, "get_fundamentals")
+            log.error(f"获取财务数据失败: {exc}")
+            continue
+        if df is None or getattr(df, 'empty', False):
+            continue
+        df = df.copy()
+        if 'day' not in df.columns:
+            df['day'] = day_date
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    if panel:
+        return merged
+    return merged
+
+
+def get_trade_day(security: Union[str, List[str]], query_dt: Union[str, datetime]) -> Any:
+    """
+    获取指定时间的交易日（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_dt = _resolve_context_dt(query_dt, default_to_context=False)
+    resolved_dt = _ensure_not_future_dt(resolved_dt, "get_trade_day.query_dt")
+    try:
+        return _provider.get_trade_day(security, resolved_dt or query_dt)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取交易日失败: {e}")
+        return None
+
+
+def get_index_weights(index_id: str, date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取指数权重（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_index_weights.date")
+    _ensure_history_view("get_index_weights", resolved_date)
+    try:
+        return _provider.get_index_weights(index_id, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取指数权重失败: {e}")
+        return pd.DataFrame()
+
+
+def get_industry_stocks(industry_code: str, date: Optional[Union[str, datetime]] = None) -> List[str]:
+    """
+    获取行业成分股（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_industry_stocks.date")
+    _ensure_history_view("get_industry_stocks", resolved_date)
+    try:
+        return _provider.get_industry_stocks(industry_code, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取行业成分股失败: {e}")
+        return []
+
+
+def get_industry(security: Union[str, List[str]], date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取标的行业信息（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_industry.date")
+    _ensure_history_view("get_industry", resolved_date)
+    try:
+        return _provider.get_industry(security, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取行业信息失败: {e}")
+        return {}
+
+
+def get_concept_stocks(concept_code: str, date: Optional[Union[str, datetime]] = None) -> List[str]:
+    """
+    获取概念成分股（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_concept_stocks.date")
+    _ensure_history_view("get_concept_stocks", resolved_date)
+    try:
+        return _provider.get_concept_stocks(concept_code, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取概念成分股失败: {e}")
+        return []
+
+
+def get_concept(security: Union[str, List[str]], date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取标的概念信息（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_concept.date")
+    _ensure_history_view("get_concept", resolved_date)
+    try:
+        return _provider.get_concept(security, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        _raise_permission_error(e, "get_concept")
+        log.error(f"获取概念信息失败: {e}")
+        return {}
+
+
+def get_fund_info(security: str, date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取基金信息（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_fund_info.date")
+    try:
+        return _provider.get_fund_info(security, date=resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        _raise_permission_error(e, "get_fund_info")
+        log.error(f"获取基金信息失败: {e}")
+        return {}
+
+
+def get_margincash_stocks(date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取融资标的列表（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_margincash_stocks.date")
+    _ensure_history_view("get_margincash_stocks", resolved_date)
+    try:
+        return _provider.get_margincash_stocks(resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        _raise_permission_error(e, "get_margincash_stocks")
+        log.error(f"获取融资标的失败: {e}")
+        return []
+
+
+def get_marginsec_stocks(date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取融券标的列表（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_marginsec_stocks.date")
+    _ensure_history_view("get_marginsec_stocks", resolved_date)
+    try:
+        return _provider.get_marginsec_stocks(resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        _raise_permission_error(e, "get_marginsec_stocks")
+        log.error(f"获取融券标的失败: {e}")
+        return []
+
+
+def get_dominant_future(underlying_symbol: str, date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取主力期货合约（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_dominant_future.date")
+    try:
+        return _provider.get_dominant_future(underlying_symbol, resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取主力合约失败: {e}")
+        return None
+
+
+def get_future_contracts(underlying_symbol: str, date: Optional[Union[str, datetime]] = None) -> Any:
+    """
+    获取期货合约列表（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_future_contracts.date")
+    try:
+        return _provider.get_future_contracts(underlying_symbol, resolved_date)
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取期货合约失败: {e}")
+        return []
+
+
+def get_billboard_list(
+    stock_list: Optional[List[str]] = None,
+    start_date: Optional[Union[str, datetime]] = None,
+    end_date: Optional[Union[str, datetime]] = None,
+    count: Optional[int] = None,
+) -> Any:
+    """
+    获取龙虎榜数据（聚宽风格）。
+    """
+    _ensure_auth()
+    if end_date is None and _current_context:
+        end_date = _current_context.current_dt.date() - timedelta(days=1)
+    resolved_start = _resolve_context_date(start_date, default_to_context=False)
+    resolved_end = _resolve_context_date(end_date, default_to_context=True)
+    resolved_end = _ensure_not_future_date(resolved_end, "get_billboard_list.end_date")
+    if _should_avoid_future() and resolved_end and _current_context:
+        if resolved_end == _current_context.current_dt.date() and _current_context.current_dt.time() < Time(15, 0):
+            raise FutureDataError(
+                "avoid_future_data=True时，回测中get_billboard_list只能在收盘后获取当日数据"
+            )
+    try:
+        return _provider.get_billboard_list(
+            stock_list=stock_list,
+            start_date=resolved_start,
+            end_date=resolved_end,
+            count=count,
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取龙虎榜数据失败: {e}")
+        return pd.DataFrame()
+
+
+def get_locked_shares(
+    stock_list: List[str],
+    start_date: Optional[Union[str, datetime]] = None,
+    end_date: Optional[Union[str, datetime]] = None,
+    forward_count: Optional[int] = None,
+) -> Any:
+    """
+    获取限售股数据（聚宽风格）。
+    """
+    _ensure_auth()
+    resolved_start = _resolve_context_date(start_date, default_to_context=False)
+    resolved_end = _resolve_context_date(end_date, default_to_context=True)
+    if resolved_start is None and resolved_end is not None:
+        resolved_start = resolved_end
+    resolved_end = _ensure_not_future_date(resolved_end, "get_locked_shares.end_date")
+    try:
+        return _provider.get_locked_shares(
+            stock_list=stock_list,
+            start_date=resolved_start,
+            end_date=resolved_end,
+            forward_count=forward_count,
+        )
+    except Exception as e:
+        _raise_if_not_implemented(e)
+        log.error(f"获取限售股数据失败: {e}")
+        return pd.DataFrame()
 
 
 def _should_use_live_current() -> bool:
@@ -1000,16 +1782,22 @@ def get_trade_days(
     Returns:
         交易日列表
     """
-    # 确保不会获取未来数据
     if _current_context:
-        max_date = _current_context.current_dt
-        if end_date:
-            if isinstance(end_date, str):
-                end_date = pd.to_datetime(end_date)
-            end_date = min(end_date, max_date)
-        else:
-            end_date = max_date
-    
+        max_dt = _current_context.current_dt
+        resolved_end = _resolve_context_dt(end_date, default_to_context=True)
+        if resolved_end is not None:
+            if _should_avoid_future() and resolved_end > max_dt:
+                raise FutureDataError(
+                    f"avoid_future_data=True时，get_trade_days的end_date({resolved_end})不能大于当前时间({max_dt})"
+                )
+            if resolved_end > max_dt:
+                resolved_end = max_dt
+        end_date = resolved_end
+    if start_date is None and count is None:
+        if end_date is None:
+            end_date = Date.today()
+        count = 1
+
     try:
         trade_days = _provider.get_trade_days(
             start_date=start_date,
@@ -1018,6 +1806,7 @@ def get_trade_days(
         )
         return [pd.to_datetime(d) for d in trade_days]
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.error(f"获取交易日失败: {e}")
         return []
 
@@ -1036,12 +1825,14 @@ def get_all_securities(
     Returns:
         DataFrame
     """
-    if _current_context and date is None:
-        date = _current_context.current_dt
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_all_securities.date")
+    _ensure_history_view("get_all_securities", resolved_date)
     
     try:
-        return _provider.get_all_securities(types=types, date=date)
+        return _provider.get_all_securities(types=types, date=resolved_date)
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.error(f"获取标的信息失败: {e}")
         return pd.DataFrame()
 
@@ -1060,12 +1851,14 @@ def get_index_stocks(
     Returns:
         成分股代码列表
     """
-    if _current_context and date is None:
-        date = _current_context.current_dt
+    resolved_date = _resolve_context_date(date, default_to_context=True)
+    resolved_date = _ensure_not_future_date(resolved_date, "get_index_stocks.date")
+    _ensure_history_view("get_index_stocks", resolved_date)
     
     try:
-        return _provider.get_index_stocks(index_symbol, date=date)
+        return _provider.get_index_stocks(index_symbol, date=resolved_date)
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.error(f"获取指数成分股失败: {e}")
         return []
 
@@ -1091,11 +1884,18 @@ def get_tick_decimals(security: str) -> int:
 
 
 __all__ = [
-    'get_price', 'attribute_history', 'get_current_data',
-    'get_trade_days', 'get_all_securities', 'get_index_stocks',
+    'get_price', 'history', 'attribute_history', 'get_bars', 'get_ticks', 'get_current_tick',
+    'get_current_data', 'get_trade_days', 'get_trade_day',
+    'get_all_securities', 'get_security_info', 'get_fund_info',
+    'get_index_stocks', 'get_index_weights',
+    'get_industry_stocks', 'get_industry', 'get_concept_stocks', 'get_concept',
+    'get_margincash_stocks', 'get_marginsec_stocks',
+    'get_dominant_future', 'get_future_contracts',
+    'get_billboard_list', 'get_locked_shares',
+    'get_extras', 'get_fundamentals', 'get_fundamentals_continuously',
+    'get_split_dividend',
     'set_current_context', 'set_data_provider', 'get_data_provider',
-    'set_security_overrides', 'reset_security_overrides',
-    'get_tick_decimals',
+    'set_security_overrides', 'reset_security_overrides', 'get_tick_decimals',
 ]
 
 
@@ -1215,5 +2015,6 @@ def get_split_dividend(
     try:
         return _provider.get_split_dividend(security, start_date=sd, end_date=ed)
     except Exception as e:
+        _raise_if_not_implemented(e)
         log.debug(f"获取分红数据失败[{security}]: {e}")
         return []
